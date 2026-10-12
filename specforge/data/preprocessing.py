@@ -39,6 +39,7 @@ from ..distributed import get_draft_sp_group, get_sp_ring_group
 from .loss_mask import has_consecutive_supervised_tokens
 from .parse import (
     DeepSeekV4Parser,
+    EmptyConversationError,
     GeneralParser,
     GLMParser,
     HarmonyParser,
@@ -163,14 +164,21 @@ def preprocess_conversations(
         if not source:
             # if the source is None, skip it
             continue
-        input_ids, loss_mask = parser.parse(
-            source,
-            max_length,
-            preformatted=is_preformatted,
-            train_only_last_turn=train_only_last_turn,
-            tool=tool,
-            **kwargs_item,
-        )
+        try:
+            input_ids, loss_mask = parser.parse(
+                source,
+                max_length,
+                preformatted=is_preformatted,
+                train_only_last_turn=train_only_last_turn,
+                tool=tool,
+                **kwargs_item,
+            )
+        except EmptyConversationError as exc:
+            # A row with no user turn carries no trainable signal once leading
+            # non-user messages are dropped, and would otherwise abort the
+            # whole dataset.map with a cryptic IndexError from the tokenizer.
+            warnings.warn(f"Skipping conversation during preprocessing: {exc}")
+            continue
         results["input_ids"].append(input_ids[None, :])
         results["loss_mask"].append(loss_mask[None, :])
         results["attention_mask"].append(torch.ones_like(loss_mask)[None, :])

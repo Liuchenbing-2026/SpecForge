@@ -16,7 +16,19 @@ __all__ = [
     "GLMParser",
     "HarmonyParser",
     "ThinkingParser",
+    "EmptyConversationError",
 ]
+
+
+class EmptyConversationError(ValueError):
+    """Raised when a conversation has no ``user`` turn to train on.
+
+    Rows that only contain system/assistant messages (or start with an
+    assistant turn) leave nothing to supervise once the leading non-user
+    messages are dropped. Surface this as a dedicated error so the dataset
+    preprocessing path can skip the row instead of letting a downstream
+    ``conversation[0]`` lookup raise a cryptic ``IndexError``.
+    """
 
 
 class Parser(ABC):
@@ -250,6 +262,12 @@ class GeneralParser(Parser):
                         break
                 sentence = self._sanitize_message(sentence)
                 messages.append(sentence)
+            if not any(message.get("role") == "user" for message in messages):
+                roles = [message.get("role") for message in messages]
+                raise EmptyConversationError(
+                    "conversation has no 'user' turn to train on "
+                    f"(roles after normalization: {roles})"
+                )
             try:
                 conversation = self.apply_chat_template(messages, tool=tool, **kwargs)
             except (ValueError, TypeError):
