@@ -16,6 +16,59 @@ from specforge.modeling.target.target_utils import (
 from specforge.utils import get_local_device, padding
 
 
+def _tied_embedding_key_candidates(head_key: str) -> list[str]:
+    """Embedding keys that may stand in for a tied ``lm_head``.
+
+    Targets with ``tie_word_embeddings: true`` store a single embedding matrix
+    and reuse it as the output projection at load time, so their checkpoints
+    never contain ``lm_head.weight``.  Probe the conventional embedding key
+    derived from the requested head key plus the common transformer layouts.
+    """
+
+    candidates: list[str] = []
+    prefix = head_key.split(".")[0]
+    if prefix:
+        candidates.append(f"{prefix}.embed_tokens.weight")
+    candidates.extend(
+        [
+            "model.embed_tokens.weight",
+            "model.language_model.embed_tokens.weight",
+        ]
+    )
+    seen: set[str] = set()
+    return [key for key in candidates if not (key in seen or seen.add(key))]
+
+
+def _resolve_target_head_key(
+    weight_map: dict[str, str], config, lm_head_key: str
+) -> tuple[str, bool]:
+    """Resolve the checkpoint key for the frozen target output head.
+
+    Returns ``(key, tied)`` where ``tied`` indicates the resolved key is the
+    input embedding matrix reused as a tied output head.
+    """
+
+    if lm_head_key in weight_map:
+        return lm_head_key, False
+
+    if getattr(config, "tie_word_embeddings", False):
+        for candidate in _tied_embedding_key_candidates(lm_head_key):
+            if candidate in weight_map:
+                return candidate, True
+        raise FileNotFoundError(
+            f"tie_word_embeddings is enabled but none of the expected "
+            f"embedding tensors {_tied_embedding_key_candidates(lm_head_key)} "
+            f"are present in the target checkpoint"
+        )
+
+    raise FileNotFoundError(
+        f"{lm_head_key!r} not found in the target checkpoint weight map. "
+        f"For a target with tied word embeddings set "
+        f"tie_word_embeddings: true, or point model.lm_head_key at the output "
+        f"head tensor."
+    )
+
+
 class TargetHead(nn.Module):
     def __init__(
         self,
@@ -85,17 +138,22 @@ class TargetHead(nn.Module):
 
         with open(index_json_path, "r") as f:
             index_json = json.load(f)
-        ckpt_file = index_json["weight_map"][lm_head_key]
+        weight_map = index_json["weight_map"]
+        resolved_key, tied = _resolve_target_head_key(
+            weight_map, self.config, lm_head_key
+        )
+        ckpt_file = weight_map[resolved_key]
 
         if ckpt_file.endswith(".safetensors"):
             with safe_open(
                 os.path.join(self.model_path, ckpt_file), framework="pt"
             ) as f:
-                lm_head = f.get_tensor(lm_head_key)
+                lm_head = f.get_tensor(resolved_key)
         else:
             state_dict = torch.load(os.path.join(self.model_path, ckpt_file))
-            lm_head = state_dict[lm_head_key]
+            lm_head = state_dict[resolved_key]
         self.fc.weight.copy_(lm_head)
+        self.tied_word_embeddings = tied
 
     def freeze_weights(self):
         for param in self.fc.parameters():
