@@ -190,9 +190,28 @@ class GeneralParser(Parser):
                 + "|$))"
             )
         else:
+            # Thinking chat templates (e.g. qwen3.5, qwen3-next-thinking) render
+            # the thinking opener only on the turns that follow the last user
+            # message; earlier assistant turns are rendered with a plain header.
+            # Match either form so historical turns stay supervised, longest
+            # header first so the opener is consumed when present.
+            assistant_markers = [self.assistant_message_separator]
+            thinking_opener = "<think>\n"
+            if (
+                chat_template.enable_thinking
+                and self.assistant_message_separator.endswith(thinking_opener)
+            ):
+                assistant_markers.append(
+                    self.assistant_message_separator[: -len(thinking_opener)]
+                )
+            header_alternation = "|".join(
+                re.escape(marker)
+                for marker in sorted(set(assistant_markers), key=len, reverse=True)
+            )
             self.assistant_pattern = (
-                re.escape(self.assistant_message_separator)
-                + r"([\s\S]*?(?:"
+                r"(?:"
+                + header_alternation
+                + r")([\s\S]*?(?:"
                 + re.escape(self.chat_template.end_of_turn_token)
                 + "|$))"
             )
