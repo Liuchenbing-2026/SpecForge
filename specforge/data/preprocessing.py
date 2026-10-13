@@ -119,7 +119,7 @@ def preprocess_conversations(
     max_length: int = 2048,
     is_preformatted: bool = False,
     train_only_last_turn: bool = False,
-    tools: Optional[List[List[Dict]]] = [[]],
+    tools: Optional[List[List[Dict]]] = None,
     **kwargs,
 ) -> Dict[str, List[torch.Tensor]]:
     """
@@ -134,6 +134,9 @@ def preprocess_conversations(
         is_preformatted: Whether the input is already formatted text strings.
         train_only_last_turn: If True, only the last assistant turn contributes to the loss.
         tools: Optional list of tools information corresponding to each conversation, used for tool-use conversations.
+            When ``None`` (the default) an empty tool list is assumed for every
+            conversation. When provided, it must contain exactly one entry per
+            conversation so that no conversation is silently dropped.
 
     Returns:
         A dictionary containing:
@@ -155,6 +158,19 @@ def preprocess_conversations(
         parser = HarmonyParser(tokenizer, chat_template)
     else:
         raise ValueError(f"Invalid parser type: {chat_template.parser_type}")
+    # ``tools`` must align one-to-one with ``conversations``. The previous
+    # default of ``[[]]`` was a single-element list, so a caller that passed
+    # several conversations without ``tools`` had every conversation after the
+    # first silently dropped by ``zip`` below. Default to ``None`` and expand it
+    # here, and fail loudly on any other length mismatch instead of truncating.
+    if tools is None:
+        tools = [[] for _ in range(len(conversations))]
+    elif len(tools) != len(conversations):
+        raise ValueError(
+            "`tools` must have exactly one entry per conversation: expected "
+            f"{len(conversations)}, got {len(tools)}. Pass `tools=None` to use "
+            "an empty tool list for every conversation."
+        )
     kwargs_list = [{} for _ in range(len(conversations))]
     for key, value_list in kwargs.items():
         for i, value in enumerate(value_list):
