@@ -620,7 +620,27 @@ def extract_context_feature(
     hidden_states: list[torch.Tensor],
     layer_ids: Optional[list[int]],
 ) -> torch.Tensor:
+    if not layer_ids:
+        raise ValueError(
+            "DFlash needs at least one target layer id to build the context "
+            "feature, but target_layer_ids is empty."
+        )
     offset = 1
+    # ``hidden_states`` is the target model's ``output_hidden_states``: index 0
+    # is the embedding output and index ``i + offset`` is the output of decoder
+    # layer ``i``. Selecting layer id ``i`` therefore needs ``i + offset + 1``
+    # entries. Check it here so a too-short capture raises a clear error instead
+    # of an opaque ``IndexError`` deep in the forward pass.
+    required = max(layer_ids) + offset + 1
+    if len(hidden_states) < required:
+        raise ValueError(
+            "DFlash target_layer_ids "
+            f"{sorted(layer_ids)} require at least {required} target hidden-state "
+            f"tensors (embedding output plus layers up to {max(layer_ids)}), but "
+            f"the target returned only {len(hidden_states)}. Check "
+            "config.num_target_layers and make the capture return every selected "
+            "layer."
+        )
     selected_states = []
     for layer_id in layer_ids:
         selected_states.append(hidden_states[layer_id + offset])
@@ -796,6 +816,18 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         **kwargs,
     ) -> CausalLMOutputWithPast:
         hidden_states = noise_embedding
+        expected = self.fc.in_features
+        got = target_hidden.shape[-1]
+        if got != expected:
+            raise ValueError(
+                "DFlash expects target_hidden with last dimension "
+                f"{expected} ({len(self.target_layer_ids)} target layer(s) x "
+                f"hidden_size {self.config.hidden_size}), but got {got}. The "
+                "target hidden-state capture does not match the configured "
+                f"target_layer_ids={self.target_layer_ids}; align "
+                "config.num_target_layers (or dflash_config.target_layer_ids) "
+                "with the layers that are actually captured."
+            )
         target_hidden = self.hidden_norm(self.fc(target_hidden))
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer_type, layer in zip(self.layer_types, self.layers):
